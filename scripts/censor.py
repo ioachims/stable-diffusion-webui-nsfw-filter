@@ -3,7 +3,7 @@ import os.path
 import gradio as gr
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageFilter
 from diffusers.utils import logging
 from scripts.safety_checker import StableDiffusionSafetyChecker
 from transformers import AutoFeatureExtractor
@@ -49,20 +49,21 @@ def check_safety(x_image, safety_checker_adj: float):
     return x_checked_image, has_nsfw_concept
 
 
-def censor_batch(x, safety_checker_adj: float):
+def censor_batch(x, safety_checker_adj: float, safety_checker_blur):
     x_samples_ddim_numpy = x.cpu().permute(0, 2, 3, 1).numpy()
     x_checked_image, has_nsfw_concept = check_safety(x_samples_ddim_numpy, safety_checker_adj)
     x = torch.from_numpy(x_checked_image).permute(0, 3, 1, 2)
+    pil_images = numpy_to_pil(x_samples_ddim_numpy)
 
-    index = 0
+    index = 0    
     for unsafe_value in has_nsfw_concept:
         try:
-            if unsafe_value is True:
-                hwc = x.shape
-                y = Image.open(warning_image).convert("RGB").resize((hwc[3], hwc[2]))
+            if unsafe_value and safety_checker_blur > 0:
+                print(f"blurring image [{index}] with {safety_checker_blur}")
+                y = pil_images[index].filter(ImageFilter.GaussianBlur(safety_checker_blur))
                 y = (np.array(y) / 255.0).astype("float32")
                 y = torch.from_numpy(y)
-                y = torch.unsqueeze(y, 0).permute(0, 3, 1, 2)
+                y = torch.unsqueeze(y, 0).permute(0, 3, 1, 2)                
                 x[index] = y
             index += 1
         except Exception as e:
@@ -92,14 +93,19 @@ class NsfwCheckScript(scripts.Script):
         """
 
         images = kwargs['images']
+        enabled = args[0]
+        print(f"nsfw checker {enabled}")
         if args[0] is True:
-            images[:] = censor_batch(images, args[1])[:]
+            images[:] = censor_batch(images, args[1], args[2])[:]
 
     def ui(self, is_img2img):
         enable_nsfw_filer = gr.Checkbox(label='Enable NSFW filter',
-                                        value=False,
+                                        value=True,
                                         elem_id=self.elem_id("enable_nsfw_filer"))
         safety_checker_adj = gr.Slider(label="Safety checker adjustment",
                                        minimum=-0.5, maximum=0.5, value=0.0, step=0.001,
                                        elem_id=self.elem_id("safety_checker_adj"))
-        return [enable_nsfw_filer, safety_checker_adj]
+        safety_checker_blur = gr.Slider(label="Safety checker blur",
+                                       minimum=0, maximum=100, value=50, step=1,
+                                       elem_id=self.elem_id("safety_checker_blur"))
+        return [enable_nsfw_filer, safety_checker_adj, safety_checker_blur]
